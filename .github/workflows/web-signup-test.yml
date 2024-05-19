@@ -33,4 +33,4 @@ jobs:
         env:
           URL: ${{ secrets.TEST_URL }}
           CHECK_URL: ${{ secrets.CHECK_URL }}
-        run: python test_signup.py ${{ github.event.inputs.num_tries }}
+        run: python test/web/test_signup.py ${{ github.event.inputs.num_tries }}
