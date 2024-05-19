@@ -1,0 +1,36 @@
+name: Test Account Signup
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      num_tries:
+        description: 'Number of signup attempts'
+        required: true
+        default: 10
+
+
+jobs:
+  test-signup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install selenium webdriver-manager
+
+      - name: Run signup test
+        env:
+          URL: ${{ secrets.TEST_URL }}
+          CHECK_URL: ${{ secrets.CHECK_URL }}
+        run: python test_signup.py ${{ github.event.inputs.num_tries }}
