@@ -9,6 +9,11 @@ on:
         description: 'Number of signup attempts'
         required: true
         default: 10
+      website:
+        description: 'Current url'
+        required: true
+        default: "https://plicated18.blog/invite/i=26624"
+      
 
 
 jobs:
@@ -31,6 +36,5 @@ jobs:
 
       - name: Run signup test
         env:
-          URL: ${{ secrets.TEST_URL }}
-          CHECK_URL: ${{ secrets.CHECK_URL }}
+          URL: ${{ github.event.inputs.website }}
         run: python test/web/test_signup.py ${{ github.event.inputs.num_tries }}

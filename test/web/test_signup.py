@@ -11,6 +11,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
+from urllib.parse import urlparse
 
 def generate_random_name(length=8):
     letters = string.ascii_lowercase
@@ -26,7 +27,9 @@ def get_driver():
 
 def main_loop(num_wanted=100):
     url = os.getenv('URL')
-    check_url = os.getenv('CHECK_URL')
+    parse_object = urlparse
+    check_url = f"https://{parse_object.netloc}/freePreview"
+    print(check_url)
 
     success_count = 0
 
