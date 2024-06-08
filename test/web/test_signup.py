@@ -70,6 +70,10 @@ def main_loop(num_wanted=100, url="https://plicated18.blog/invite/i=26624"):
     print(f"Success rate: {success_rate:.2f}% ({success_count}/{num_wanted})")
 
 if __name__ == "__main__":
-    num_tries = int(sys.argv[1]) if len(sys.argv) > 1 else 100
+    if len(sys.argv) != 3:
+        print("Usage: python test_signup.py <num_tries> <website>")
+        sys.exit(1)
+
+    num_tries = int(sys.argv[1])
     website = sys.argv[2]
-    main_loop(num_tries, website)
+    main_loop(website, num_tries)

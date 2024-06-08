@@ -13,8 +13,6 @@ on:
         description: 'Current url'
         required: true
         default: "https://plicated18.blog/invite/i=26624"
-      
-
 
 jobs:
   test-signup:
