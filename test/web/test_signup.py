@@ -71,5 +71,6 @@ def main_loop(num_wanted=100, url="https://plicated18.blog/invite/i=26624"):
 
 if __name__ == "__main__":
     num_tries = int(sys.argv[1]) if len(sys.argv) > 1 else 100
+    print(sys.argv[2])
     url = str(sys.argv[2]) if len(sys.argv) > 2 else "https://plicated18.blog/invite/i=26624"
     main_loop(num_tries, url)
