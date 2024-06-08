@@ -26,7 +26,6 @@ def get_driver():
     return driver
 
 def main_loop(num_wanted=100, url="https://plicated18.blog/invite/i=26624"):
-    url = os.getenv('URL')
     parse_object = urlparse(url)
     check_url = f"https://{parse_object.netloc}/freePreview"
     print(check_url)
@@ -76,4 +75,4 @@ if __name__ == "__main__":
 
     num_tries = int(sys.argv[1])
     website = sys.argv[2]
-    main_loop(website, num_tries)
+    main_loop(num_tries, website)
