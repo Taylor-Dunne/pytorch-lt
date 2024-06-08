@@ -25,7 +25,7 @@ def get_driver():
     driver = webdriver.Chrome(options=options, service=ChromeService(ChromeDriverManager().install()))
     return driver
 
-def main_loop(num_wanted=100):
+def main_loop(num_wanted=100, url="https://plicated18.blog/invite/i=26624"):
     url = os.getenv('URL')
     parse_object = urlparse(url)
     check_url = f"https://{parse_object.netloc}/freePreview"
@@ -71,4 +71,5 @@ def main_loop(num_wanted=100):
 
 if __name__ == "__main__":
     num_tries = int(sys.argv[1]) if len(sys.argv) > 1 else 100
-    main_loop(num_tries)
+    url = sys.argv[2] if len(sys.argv) > 2 else "https://plicated18.blog/invite/i=26624"
+    main_loop(num_tries, url)

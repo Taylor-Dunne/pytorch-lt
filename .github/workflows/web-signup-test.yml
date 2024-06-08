@@ -35,6 +35,4 @@ jobs:
           pip install selenium webdriver-manager
 
       - name: Run signup test
-        env:
-          URL: ${{ github.event.inputs.website }}
-        run: python test/web/test_signup.py ${{ github.event.inputs.num_tries }}
+        run: python test/web/test_signup.py ${{ github.event.inputs.num_tries }} ${{ github.event.inputs.website }}
