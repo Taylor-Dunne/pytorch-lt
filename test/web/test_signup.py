@@ -27,7 +27,7 @@ def get_driver():
 
 def main_loop(num_wanted=100):
     url = os.getenv('URL')
-    parse_object = urlparse
+    parse_object = urlparse(url)
     check_url = f"https://{parse_object.netloc}/freePreview"
     print(check_url)
 
