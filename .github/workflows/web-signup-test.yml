@@ -8,7 +8,7 @@ on:
       num_tries:
         description: 'Number of signup attempts'
         required: true
-        default: 10
+        default: 3
       website:
         description: 'Current url'
         required: true
