@@ -24,8 +24,7 @@
 #include <utility>
 #include <vector>
 
-namespace torch {
-namespace autograd {
+namespace torch::autograd {
 
 // Returns a ViewFunc with a corresponding view that matches the shape,
 // stride, and storage offset of the given tensor.
@@ -255,9 +254,9 @@ void create_cpp_hook(const at::TensorBase& self, bool is_retains_grad_hook) {
   const auto& fn = self.grad_fn();
   std::shared_ptr<hooks_list>& list =
       materialize_autograd_meta(self)->cpp_hooks_list_;
-  list.reset(new hooks_list());
-  std::unique_ptr<FunctionPreHook> hook_ptr{
-      new CppFunctionTensorPreHook(list, self.output_nr())};
+  list = std::make_shared<hooks_list>();
+  auto hook_ptr =
+      std::make_unique<CppFunctionTensorPreHook>(list, self.output_nr());
   // NB: we could potentially only update hooks_ if !fn, but it shouldn't
   // matter
   //     and this was the way before, so we keep it like this for now.
@@ -564,9 +563,10 @@ void VariableHooks::retain_grad(const at::TensorBase& self) const {
   };
 
   const auto& fn = self.grad_fn();
-  std::unique_ptr<FunctionPreHook> hook_ptr{new CppFunctionSingleTensorPreHook(
-      std::move(retain_grad_hook), self.output_nr())};
-  fn->add_retains_grad_hook(std::move(hook_ptr), self.output_nr());
+  fn->add_retains_grad_hook(
+      std::make_unique<CppFunctionSingleTensorPreHook>(
+          std::move(retain_grad_hook), self.output_nr()),
+      self.output_nr());
   impl::get_autograd_meta(self)->retains_grad_ = true;
 }
 
@@ -906,5 +906,4 @@ std::unique_ptr<ViewFunc> ChainedViewFunc::clone_and_set(
       second->clone_and_set(second_symints, second_tensors));
 }
 
-} // namespace autograd
-} // namespace torch
+} // namespace torch::autograd

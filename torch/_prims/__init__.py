@@ -1,17 +1,16 @@
-import contextlib
-import itertools
+# mypy: allow-untyped-defs
 import operator
-import weakref
 from enum import Enum
 from functools import partial, reduce
-from typing import Any, Callable, List, Optional, Sequence, Tuple, Type, Union
+from typing import Callable, List, Optional, Sequence, Tuple, Type, Union
 
 import torch
-
 import torch._prims_common as utils
 import torch.library
-from torch import sym_float, Tensor, TypedStorage
+from torch import sym_float, Tensor
 from torch._C import _get_default_device
+from torch._higher_order_ops.effects import new_token_tensor
+from torch._library.utils import is_functional_schema
 from torch._prims.debug_prims import register_debug_prims
 from torch._prims.rng_prims import register_rng_prims
 from torch._prims_common import (
@@ -32,6 +31,7 @@ from torch._prims_common.wrappers import backwards_not_supported
 from torch._subclasses.fake_tensor import FakeTensor, FakeTensorMode
 from torch.overrides import handle_torch_function, has_torch_function
 from torch.utils._pytree import tree_flatten, tree_map, tree_unflatten
+
 
 prim = torch.library.Library("prims", "DEF")
 prim_impl = torch.library.Library("prims", "IMPL", "CompositeExplicitAutograd")
@@ -271,13 +271,13 @@ def _make_prim(
     impl_aten: Callable,
     doc: str,
     tags: Optional[Sequence[torch.Tag]] = None,
+    use_old_custom_ops_api: bool = False,
+    register_conj_neg_fallthrough: bool = False,
 ):
     """
     Creates a primitive operation.
 
     """
-
-    prim.define(schema, tags=torch.Tag.pt2_compliant_tag)
 
     def _prim_impl(*args, **kwargs):
         # always run the meta function because aten implementation will
@@ -302,14 +302,52 @@ def _make_prim(
             return _prim_impl(*args, **kwargs)
 
     name = schema.split("(")[0]
-    prim_impl.impl(name, _prim_impl)
-    prim_autograd_impl.impl(name, _autograd_impl)
-    prim_meta_impl.impl(name, meta)
+    schema = schema[len(name) :]
+
+    # register non-functional ops with old custom ops API
+    cpp_schema = torch._C.parse_schema(name + schema)
+    if use_old_custom_ops_api or not is_functional_schema(cpp_schema):
+        prim.define(name + schema, tags=torch.Tag.pt2_compliant_tag)
+        prim_impl.impl(name, _prim_impl)
+        prim_autograd_impl.impl(name, _autograd_impl)
+        prim_meta_impl.impl(name, meta)
+    else:
+        mutates_args = []
+        for arg in cpp_schema.arguments:
+            if arg.alias_info is not None and arg.alias_info.is_write:
+                mutates_args.append(arg.name)
+        prim_def = torch.library.custom_op(
+            "prims::" + name,
+            _prim_impl,
+            mutates_args=tuple(mutates_args),
+            schema=schema,
+        )
+        prim_def.register_fake(meta)
+
+        # all view ops get conj/neg fallthroughs
+        if return_type == RETURN_TYPE.VIEW or register_conj_neg_fallthrough:
+            prim_def._lib.impl(name, torch.library.fallthrough_kernel, "Conjugate")
+            prim_def._lib.impl(name, torch.library.fallthrough_kernel, "Negative")
 
     _prim_packet = getattr(torch._ops.ops.prims, name)
     _prim = _prim_packet.default
     if tags:
         _prim._tags = tags
+    elif aten_packet := getattr(torch.ops.aten, name, None):
+        overload_tags = [
+            getattr(aten_packet, overload).tags for overload in aten_packet.overloads()
+        ]
+        tags_intersection = set(overload_tags[0])
+        tags_intersection.intersection_update(*overload_tags[1:])
+
+        # dont inadvertently add to prim ops
+        tags_intersection.discard(torch.Tag.core)
+        # causes errors with python ref executor tests, none of the
+        # data dependent pytorch ops actually decompose to prims
+        tags_intersection.discard(torch.Tag.data_dependent_output)
+
+        # iter over first tags for determinism
+        _prim._tags = tuple(t for t in overload_tags[0] if t in tags_intersection)
 
     from torch._subclasses.fake_tensor import contains_tensor_types
 
@@ -670,6 +708,7 @@ clone = _make_prim(
     impl_aten=torch.clone,
     doc="Returns the copy of a tensor",
     return_type=RETURN_TYPE.NEW,
+    register_conj_neg_fallthrough=True,
 )
 
 digamma = _make_elementwise_unary_prim(
@@ -752,7 +791,7 @@ floor = _make_elementwise_unary_prim(
 )
 
 imag = _make_prim(
-    schema="imag(Tensor self) -> Tensor",
+    schema="imag(Tensor(a) self) -> Tensor(a)",
     meta=partial(
         _complex_only_elementwise_meta,
         type_promotion=ELEMENTWISE_PRIM_TYPE_PROMOTION_KIND.COMPLEX_TO_FLOAT,
@@ -805,7 +844,7 @@ log10 = _make_elementwise_unary_prim(
 )
 
 real = _make_prim(
-    schema="real(Tensor self) -> Tensor",
+    schema="real(Tensor(a) self) -> Tensor(a)",
     meta=partial(
         _complex_only_elementwise_meta,
         type_promotion=ELEMENTWISE_PRIM_TYPE_PROMOTION_KIND.COMPLEX_TO_FLOAT,
@@ -1479,186 +1518,6 @@ def expand_dims(
     return broadcast_in_dim(a, new_shape, broadcast_dimensions)
 
 
-# Note: saves the Python slice object because we're about to clobber its name with the slice prim
-pyslice: Type[slice] = slice  # type: ignore[has-type]
-
-
-def _slice_meta(
-    a: TensorLikeType,
-    start_indices: DimsSequenceType,
-    limit_indices: DimsSequenceType,
-    strides: Optional[StrideType] = None,
-) -> TensorLikeType:
-    _strides = strides if strides is not None else [1] * len(start_indices)
-
-    if a.ndim != len(start_indices):
-        msg = f"Attempting to slice tensor of rank {a.ndim} with start_indices of length {len(start_indices)}!"
-        raise ValueError(msg)
-
-    if a.ndim != len(limit_indices):
-        msg = f"Attempting to slice tensor of rank {a.ndim} with limit_indices of length {len(limit_indices)}!"
-        raise ValueError(msg)
-
-    if a.ndim != len(_strides):
-        msg = f"Attempting to slice tensor of rank {a.ndim} with strides of length {len(limit_indices)}!"
-        raise ValueError(msg)
-
-    for x, y in zip(start_indices, a.shape):
-        if x < 0:
-            msg = f"Attempting to slice a tensor with a negative start index of {x}!"
-            raise ValueError(msg)
-        if x > y:
-            msg = (
-                f"Attempting to slice a tensor but a start index in {start_indices} is greater than"
-                f" the length of its corresponding dimension in shape {a.shape}"
-            )
-            raise ValueError(msg)
-
-    for x, y, z in zip(limit_indices, a.shape, start_indices):
-        if x < 0:
-            msg = f"Attempting to slice a tensor with a negative stop index of {x}!"
-            raise ValueError(msg)
-        if x > y:
-            msg = (
-                f"Attempting to slice a tensor but a stop index in {limit_indices} is greater than the length of "
-                f" its corresponding dimension in shape {a.shape}"
-            )
-            raise ValueError(msg)
-        if x < z:
-            msg = (
-                f"Attempting to slice a tensor but a start index in {x} is greater than "
-                f" its corresponding stop index {z}"
-            )
-
-    for x in _strides:
-        if x <= 0:
-            msg = f"Attempting to slice a tensor with a non-positive step of {x}!"
-            raise ValueError(msg)
-
-    new_shape = []
-    for x, y, z in zip(start_indices, limit_indices, _strides):
-        new_shape.append(1 + (y - x - 1) // z)
-
-    new_strides = []
-    for x, y in zip(a.stride(), _strides):
-        new_strides.append(x * y)
-
-    return a.as_strided(new_shape, new_strides, a.storage_offset())
-
-
-def _slice_aten(
-    a: Tensor,
-    start_indices: DimsSequenceType,
-    limit_indices: DimsSequenceType,
-    strides: Optional[StrideType] = None,
-) -> Tensor:
-    _strides = strides if strides is not None else [1] * len(start_indices)
-
-    slices = []
-    for start, stop, step in zip(start_indices, limit_indices, _strides):
-        slices.append(pyslice(start, stop, step))
-
-    return operator.getitem(a, slices)  # type: ignore[call-overload]
-
-
-_slice_doc = """
-    Creates a view of a "bounding box" within the tensor.
-
-    The bounding box is specified independently in each of the tensor's dimensions.
-    start_indices and limit_indices describe the box's boundaries for their corresponding
-    dimensions. If strides is specified then they specify the step size between elements
-    in their corresponding dimension.
-
-    This operation is analogous to slicing in NumPy, but does not permit slices where
-    the stop indices are less than the start indices.
-    """
-
-slice = _make_prim(
-    schema="slice(Tensor(a) a, SymInt[] start_indices, SymInt[] limit_indices, SymInt[]? strides=None) -> Tensor(a)",
-    meta=_slice_meta,
-    impl_aten=_slice_aten,
-    return_type=RETURN_TYPE.VIEW,
-    doc=_slice_doc,
-)
-
-
-def _slice_in_dim_meta(
-    a: TensorLikeType,
-    start_index: int,
-    limit_index: int,
-    stride: int = 1,
-    axis: int = 0,
-) -> TensorLikeType:
-    if axis < 0:
-        msg = f"slice_in_dim: received a negative axis {axis}"
-        raise ValueError(msg)
-    if axis >= a.ndim:
-        msg = f"slice_in_dim: axis {axis} is greater or equal to the rank {a.ndim} of the tensor"
-        raise ValueError(msg)
-
-    if start_index < 0:
-        msg = f"slice_in_dim: received a negative start_index {start_index}"
-        raise ValueError(msg)
-
-    if start_index > a.shape[axis]:
-        msg = f"slice_in_dim: start_index is greater than the length {start_index} of dimension {axis}"
-        raise ValueError(msg)
-
-    if limit_index > a.shape[axis]:
-        msg = f"slice_in_dim: limit_index is greater than the length {limit_index} of dimension {axis}"
-        raise ValueError(msg)
-
-    if limit_index < start_index:
-        msg = f"slice_in_dim: received a limit_index {limit_index} less than the start_index {start_index}"
-        raise ValueError(msg)
-
-    if stride < 0:
-        msg = f"slice_in_dim: received a non-positive stride of {stride}!"
-        raise ValueError(msg)
-
-    start_indices = [0] * a.ndim
-    limit_indices = list(a.shape)
-    strides = [1] * a.ndim
-
-    start_indices[axis] = start_index
-    limit_indices[axis] = limit_index
-    strides[axis] = stride
-
-    return _slice_meta(a, start_indices, limit_indices, strides)
-
-
-def _slice_in_dim_aten(
-    a: Tensor,
-    start_index: int,
-    limit_index: int,
-    stride: int = 1,
-    axis: int = 0,
-) -> Tensor:
-    start_indices = [0] * a.ndim
-    limit_indices = list(a.shape)
-    strides = [1] * a.ndim
-
-    start_indices[axis] = start_index
-    limit_indices[axis] = limit_index
-    strides[axis] = stride
-
-    return slice(a, start_indices, limit_indices, strides)
-
-
-_slice_in_dim_doc = """
-    Convenience wrapper for slicing just one dimension using slice.
-    """
-
-# TODO: make stride SymInt
-slice_in_dim = _make_prim(
-    schema="slice_in_dim(Tensor(a) a, SymInt start_index, SymInt limit_index, int stride=1, int axis=0) -> Tensor(a)",
-    meta=_slice_in_dim_meta,
-    impl_aten=_slice_in_dim_aten,
-    return_type=RETURN_TYPE.VIEW,
-    doc=_slice_in_dim_doc,
-)
-
-
 def _split_dim_meta(a: TensorLikeType, dim: int, outer_length: int) -> TensorLikeType:
     assert isinstance(a, TensorLike)
     utils.validate_idx(a.ndim, dim)
@@ -1798,7 +1657,7 @@ _view_of_doc = """
     """
 
 view_of = _make_prim(
-    schema="view_of(Tensor(a) a) -> Tensor",
+    schema="view_of(Tensor(a) a) -> Tensor(a)",
     meta=_view_of_meta,
     impl_aten=_view_of_aten,
     return_type=RETURN_TYPE.VIEW,
@@ -1819,7 +1678,7 @@ _view_element_type_doc = """
     """
 
 view_element_type = _make_prim(
-    schema="view_of_dtype(Tensor(a) a, ScalarType dtype) -> Tensor",
+    schema="view_of_dtype(Tensor(a) a, ScalarType dtype) -> Tensor(a)",
     meta=_view_element_type_meta,
     impl_aten=_view_element_type_aten,
     return_type=RETURN_TYPE.VIEW,
@@ -2086,16 +1945,19 @@ convert_element_type = _make_prim(
 
 
 def _device_put_meta(
-    a: TensorLikeType, device: Union[str, torch.device]
+    a: TensorLikeType, device: Union[str, torch.device], non_blocking=False
 ) -> TensorLikeType:
     assert isinstance(a, TensorLike)
     assert isinstance(device, (str, torch.device))
+    assert isinstance(non_blocking, bool)
 
     return TensorMeta(a, device=utils.canonicalize_device(device))
 
 
-def _device_put_aten(a: Tensor, device: Union[str, torch.device]) -> Tensor:
-    return a.to(device)
+def _device_put_aten(
+    a: Tensor, device: Union[str, torch.device], non_blocking=False
+) -> Tensor:
+    return a.to(device, non_blocking=non_blocking)
 
 
 _device_put_doc = """
@@ -2103,7 +1965,7 @@ _device_put_doc = """
   """
 
 device_put = _make_prim(
-    schema="device_put(Tensor a, Device device) -> Tensor",
+    schema="device_put(Tensor a, Device device, bool non_blocking=False) -> Tensor",
     meta=_device_put_meta,
     impl_aten=_device_put_aten,
     return_type=RETURN_TYPE.NEW,
@@ -2122,13 +1984,22 @@ _item_doc = """
     Converts a tensor with one element to a Python number.
 """
 
+
+# We can't call into python dispatcher for item again
+# because the current prim decomp calls into python dispatcher
+# again. https://github.com/pytorch/pytorch/issues/136050
+def _item_aten_no_python_dispatcher(*args, **kwargs):
+    with torch._dispatch.python.no_python_dispatcher():
+        return torch.Tensor.item(*args, **kwargs)
+
+
 # TODO: create a new return type for scalars?
 # FIXME: currently returns integers for boolean tensors
 # https://github.com/pytorch/pytorch/issues/78071
 item = _make_prim(
     schema="item(Tensor a) -> Scalar",
     meta=_item_meta,
-    impl_aten=torch.Tensor.item,
+    impl_aten=_item_aten_no_python_dispatcher,
     return_type=RETURN_TYPE.NEW,
     doc=_item_doc,
 )
@@ -2236,6 +2107,7 @@ copy_to = _make_prim(
     impl_aten=_copy_to_aten,
     return_type=RETURN_TYPE.INPLACE,
     doc=_copy_to_doc,
+    register_conj_neg_fallthrough=True,
 )
 
 
@@ -2319,7 +2191,7 @@ def _reduction_meta(inp, dims, *, output_dtype=None):
     )
 
 
-def _var_reduction_meta(inp, dims, *, correction):
+def _var_reduction_meta(inp, dims, correction):
     if utils.is_complex_dtype(inp.dtype):
         output_dtype = utils.corresponding_real_dtype(inp.dtype)
     else:
@@ -2366,7 +2238,7 @@ def _make_reduction_prim(name: str, impl_aten, doc):
 def _make_var_reduction_prim(name: str, impl_aten, doc):
     """Creates a reduction prim."""
     return _make_prim(
-        schema=f"{name}(Tensor inp, int[]? dims, *, float correction, ScalarType? output_dtype=None) -> Tensor",
+        schema=f"{name}(Tensor inp, int[]? dims, float? correction=1, *, ScalarType? output_dtype=None) -> Tensor",
         meta=_var_reduction_meta,
         impl_aten=impl_aten,
         return_type=RETURN_TYPE.NEW,
@@ -2404,6 +2276,8 @@ def _prod_aten(
     dtype: Optional[torch.dtype] = None,
 ) -> Tensor:
     if dims is not None:
+        if len(dims) == 0:
+            return inp.clone()
         for d in sorted(dims, reverse=True):
             assert d >= 0
             inp = torch.prod(inp, d, dtype=dtype)
@@ -2418,9 +2292,15 @@ prod = _make_reduction_prim(
     doc=_prod_doc,
 )
 
+
+# torch.var, but correction is not kwarg-only
+def torch_var(input, dim=None, correction=1, **kwargs):
+    return torch.var(input, dim=dim, correction=correction, **kwargs)
+
+
 var = _make_var_reduction_prim(
     name="var",
-    impl_aten=torch.var,
+    impl_aten=torch_var,
     doc=_var_doc,
 )
 
@@ -3036,7 +2916,7 @@ frexp = _make_prim(
 
 
 def _make_token_aten() -> TensorLikeType:
-    return torch.empty(0)
+    return new_token_tensor()
 
 
 _make_token = _make_prim(

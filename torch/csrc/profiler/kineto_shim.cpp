@@ -8,9 +8,8 @@
 #include <c10/util/Exception.h>
 
 namespace torch {
-namespace profiler {
-namespace impl {
-namespace kineto {
+
+namespace profiler::impl::kineto {
 
 // Here lies pain and `#ifdef USE_KINETO`
 
@@ -48,6 +47,7 @@ const std::set<libkineto::ActivityType> kXpuTypes = {
 const std::set<libkineto::ActivityType> kMtiaTypes = {
     libkineto::ActivityType::MTIA_CCP_EVENTS,
     libkineto::ActivityType::MTIA_RUNTIME,
+    libkineto::ActivityType::MTIA_WORKLOADD,
 };
 const std::set<libkineto::ActivityType> kPrivateUse1Types = {
     libkineto::ActivityType::GPU_MEMCPY,
@@ -95,8 +95,6 @@ TraceWrapper::TraceWrapper(const int64_t start_time, const std::string& name)
 {
 }
 #endif // USE_KINETO
-
-TraceWrapper::~TraceWrapper() = default;
 
 activity_t* TraceWrapper::addCPUActivity(
     const std::string& name,
@@ -227,6 +225,7 @@ void prepareTrace(
     const ActivitySet& activities,
     const torch::profiler::impl::ExperimentalConfig& config) {
 #ifdef USE_KINETO
+  libkineto::api().resetKinetoTLS();
   if (!libkineto::api().isProfilerRegistered()) {
     libkineto_init(/*cpuOnly=*/cpuOnly, /*logOnError=*/true);
     libkineto::api().suppressLogMessages();
@@ -272,6 +271,16 @@ void prepareTrace(
   }
 
   libkineto::api().activityProfiler().prepareTrace(k_activities);
+#endif // USE_KINETO
+}
+
+void toggleCollectionDynamic(const bool enable) {
+#ifdef USE_KINETO
+  // TODO: We may want to consider adding another input arg for this function
+  // if we want to support turning off certain devices and keeping others on.
+  // For now, we can keep it simple at have it turn off all tracing of "CUDA"
+  // devices
+  libkineto::api().activityProfiler().toggleCollectionDynamic(enable);
 #endif // USE_KINETO
 }
 
@@ -334,12 +343,9 @@ void logInvariantViolation(
 #endif // USE_KINETO
 }
 
-} // namespace kineto
-} // namespace impl
-} // namespace profiler
+} // namespace profiler::impl::kineto
 
-namespace autograd {
-namespace profiler {
+namespace autograd::profiler {
 c10::DeviceType deviceTypeFromActivity(libkineto::ActivityType activity_type) {
   // fallthrough
   switch (activity_type) {
@@ -348,9 +354,7 @@ c10::DeviceType deviceTypeFromActivity(libkineto::ActivityType activity_type) {
     case libkineto::ActivityType::CONCURRENT_KERNEL:
     case libkineto::ActivityType::CUDA_SYNC:
     case libkineto::ActivityType::GPU_USER_ANNOTATION:
-    case libkineto::ActivityType::CUDA_PROFILER_RANGE:
-    // TODO: T151322015
-    case libkineto::ActivityType::MTIA_CCP_EVENTS: {
+    case libkineto::ActivityType::CUDA_PROFILER_RANGE: {
       // PrivateUse1 kineto backend reuse above ActivityTypes,
       // If PrivateUse1 backend enabled, this should return
       // c10::DeviceType::PrivateUse1.
@@ -359,6 +363,20 @@ c10::DeviceType deviceTypeFromActivity(libkineto::ActivityType activity_type) {
           return c10::DeviceType::PrivateUse1;
         }
         return c10::DeviceType::CUDA;
+      }();
+      return device_type;
+    }
+    // TODO: T151322015
+    case libkineto::ActivityType::MTIA_CCP_EVENTS:
+    case libkineto::ActivityType::MTIA_WORKLOADD: {
+      // PrivateUse1 kineto backend reuse above ActivityTypes,
+      // If PrivateUse1 backend enabled, this should return
+      // c10::DeviceType::PrivateUse1.
+      c10::DeviceType device_type = []() {
+        if (c10::get_privateuse1_backend() != "privateuseone") {
+          return c10::DeviceType::PrivateUse1;
+        }
+        return c10::DeviceType::MTIA;
       }();
       return device_type;
     }
@@ -410,6 +428,6 @@ void profilerStep() {
 #endif // USE_KINETO
 }
 
-} // namespace profiler
-} // namespace autograd
+} // namespace autograd::profiler
+
 } // namespace torch

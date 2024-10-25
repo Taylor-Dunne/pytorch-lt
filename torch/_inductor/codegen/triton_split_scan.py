@@ -1,15 +1,14 @@
+# mypy: allow-untyped-defs
 import functools
-
-from typing import Optional, Set
+from typing import Optional
 
 import torch._inductor.runtime.hints
 from torch._inductor import config
 from torch._inductor.codegen.simd import IterationRangesRoot
-
 from torch._inductor.codegen.triton import triton_compute_type, TritonKernel
-
+from torch._inductor.runtime.triton_heuristics import split_scan_grid
 from torch._prims_common import prod
-
+from torch.utils._ordered_set import OrderedSet
 from torch.utils._sympy.functions import CeilDiv
 
 
@@ -33,10 +32,10 @@ class TritonSplitScanKernel(TritonKernel):
         self,
         *groups,
         index_dtype: str,
-        mutations: Optional[Set[str]] = None,
+        mutations: Optional[OrderedSet[str]] = None,
         reduction_hint=torch._inductor.runtime.hints.ReductionHint.DEFAULT,
         min_elem_per_thread=0,
-    ):
+    ) -> None:
         super().__init__(
             *groups,
             index_dtype=index_dtype,
@@ -46,6 +45,9 @@ class TritonSplitScanKernel(TritonKernel):
             min_elem_per_thread=min_elem_per_thread,
         )
         self.no_x_dim = True
+
+    def should_use_persistent_reduction(self) -> bool:
+        return False
 
     def initialize_range_tree(self, pid_cache):
         prefixes = "yxr"
@@ -73,8 +75,6 @@ class TritonSplitScanKernel(TritonKernel):
                     has_zdim=False,
                 )
             )
-        for tree in self.range_trees:
-            tree.codegen_header(self.body)
 
     def reduction(self, dtype, src_dtype, reduction_type, value):
         raise NotImplementedError("NYI TritonSplitDimKernel reductions")
@@ -115,7 +115,6 @@ class TritonSplitScanKernel(TritonKernel):
 
         masks = {f"{tree.prefix}mask" for tree in self.range_trees}
         self.filter_masks(masks)
-        masks = sorted(masks)
         assert not self._load_mask, "ops.scan not supported inside ops.masked"
 
         value = cse_compute(f"{value}.to({compute_type})")
@@ -133,7 +132,7 @@ class TritonSplitScanKernel(TritonKernel):
                 {exclusive_prefix} = triton_helpers.exclusive_scan_decoupled_lookback_64(
                     {scratch_base},
                     {block_sum},
-                    {self.range_trees[-1].get_pid()},
+                    {self.iteration_ranges_get_pid(self.range_trees[-1])},
                     {combine_helper_fn},
                 )
                 """,
@@ -149,7 +148,7 @@ class TritonSplitScanKernel(TritonKernel):
                 {exclusive_prefix} = triton_helpers.exclusive_scan_decoupled_lookback(
                     {scratch_base},
                     {block_sum},
-                    {self.range_trees[-1].get_pid()},
+                    {self.iteration_ranges_get_pid(self.range_trees[-1])},
                     {combine_helper_fn},
                     DTYPE_VALUE_AS_UINT={value_as_uint_dtype},
                     DTYPE_PACK={scratch_type},
@@ -171,5 +170,8 @@ class TritonSplitScanKernel(TritonKernel):
     def _get_heuristic(self):
         return "split_scan"
 
-    def _get_grid_fn(self):
+    def _get_grid_fn_str(self):
         return "split_scan_grid"
+
+    def _get_grid_fn(self):
+        return split_scan_grid

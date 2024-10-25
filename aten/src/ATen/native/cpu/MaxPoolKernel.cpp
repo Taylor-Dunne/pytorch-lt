@@ -11,6 +11,7 @@
 #include <c10/util/irange.h>
 #include <type_traits>
 #include <ATen/OpMathType.h>
+#include <ATen/native/ReduceOpsUtils.h>
 
 namespace at::native {
 
@@ -63,7 +64,7 @@ vec::Vectorized<int64_t> is_nan_vec<int64_t>(vec::Vectorized<int64_t> vec) {
 
 template <typename scalar_t, typename opmath_t>
 inline
-typename std::enable_if<std::is_same<scalar_t, opmath_t>::value, void>::type
+std::enable_if_t<std::is_same_v<scalar_t, opmath_t>, void>
 compute_internal(
   const scalar_t* input_data,
   scalar_t* out_data,
@@ -85,7 +86,9 @@ compute_internal(
   using iVec = vec::Vectorized<integer_t>;
   // Pass I: init out lane
   iVec index0_vec = iVec(id0 * input_height * input_width + ih0 * input_width + iw0);
-  Vec out_vec = Vec(-std::numeric_limits<scalar_t>::infinity());
+
+  scalar_t min_value = lower_bound<scalar_t>();
+  Vec out_vec = Vec(min_value);
   int64_t d1 = 0;
   for (; d1 < len; d1 += Vec::size()) {
     index0_vec.store(index_ptr + d1);
@@ -93,7 +96,7 @@ compute_internal(
   }
   for (; d1 < size; d1++) {
     ind[d1] = ih0 * input_width + iw0;
-    out_data[d1] = -std::numeric_limits<scalar_t>::infinity();
+    out_data[d1] = min_value;
   }
   // Pass II: compute local max
   for (int64_t id = id0; id < id1; id += dilationD) {
@@ -136,7 +139,7 @@ compute_internal(
 // std::is_same<scalar_t, at::BFloat16> || std::is_same<scalar_t, at::Half>
 template <typename scalar_t, typename opmath_t>
 inline
-typename std::enable_if<!std::is_same<scalar_t, opmath_t>::value, void>::type
+std::enable_if_t<!std::is_same_v<scalar_t, opmath_t>, void>
 compute_internal(
   const scalar_t* input_data,
   scalar_t* out_data,

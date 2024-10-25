@@ -124,7 +124,7 @@ inline std::string Join(const std::string& delimiter, const Container& v) {
   for (auto i = v.begin(); i != v.end(); ++i, --cnt) {
     s << (*i) << (cnt ? delimiter : "");
   }
-  return s.str();
+  return std::move(s).str();
 }
 
 // Replace all occurrences of "from" substring to "to" string.
@@ -142,7 +142,7 @@ struct C10_API SourceLocation {
 std::ostream& operator<<(std::ostream& out, const SourceLocation& loc);
 
 // unix isprint but insensitive to locale
-inline static bool isPrint(char s) {
+inline bool isPrint(char s) {
   return s > 0x1f && s < 0x7f;
 }
 
