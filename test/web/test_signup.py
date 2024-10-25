@@ -25,9 +25,10 @@ def get_driver():
     driver = webdriver.Chrome(options=options, service=ChromeService(ChromeDriverManager().install()))
     return driver
 
-def main_loop(num_wanted=100, url="https://plicated18.blog/invite/i=26624"):
+
+def main_loop(url, num_wanted=100):
     parse_object = urlparse(url)
-    check_url = f"https://{parse_object.netloc}/freePreview"
+    check_url = f"https://{parse_object.netloc}/dashboard"
     print(check_url)
 
     success_count = 0
@@ -36,23 +37,55 @@ def main_loop(num_wanted=100, url="https://plicated18.blog/invite/i=26624"):
         try:
             print("Starting", index)
             driver = get_driver()
-            
-            driver.get(url)
-            time.sleep(5)
 
+            driver.get(url)
             print(driver.current_url)
             print(driver.page_source)
 
+            class_name = 'login-content'
+            if WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, class_name))):
+                print("Element found")
+            else:
+                print("Element not found")
+
+
             username_field = driver.find_element(By.NAME, "username")
             password_field = driver.find_element(By.NAME, "password")
-            confirm_password_field = driver.find_element(By.NAME, "repeatPassword")
+            confirm_password_field = driver.find_element(By.NAME, "cpassword")
+
+
+            add_num1 = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.NAME, "num1"))).get_attribute('value')
+            add_num2 = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.NAME, "num2"))).get_attribute('value')
 
             login = generate_random_name()
             username_field.send_keys(login)
             password_field.send_keys(login)
             confirm_password_field.send_keys(login)
 
-            password_field.send_keys(Keys.RETURN)
+
+    
+
+
+            if add_num1 is not None:
+              print(add_num1, add_num2)
+
+              captchax = driver.find_element(By.NAME, "captchax")
+              print(int(add_num1) + int(add_num2))
+              captchax.send_keys(int(add_num1) + int(add_num2))
+
+              # confirm input was correct
+              print(captchax.get_attribute('value'))
+
+              captchax.send_keys(Keys.RETURN)
+            else:
+              confirm_password_field.send_keys(Keys.RETURN)
+
+            time.sleep(2)
+
+            print("Done 1", driver.current_url)
+            print(driver.page_source)
+
+
 
             WebDriverWait(driver, 10).until(EC.url_matches(check_url))
             print("Done", driver.current_url)
@@ -60,13 +93,15 @@ def main_loop(num_wanted=100, url="https://plicated18.blog/invite/i=26624"):
             success_count += 1
 
         except Exception as e:
-            print(f"Error on attempt {index}: {e}")
-
+            print("Error:", e)
+            driver.quit()
         finally:
             driver.quit()
 
     success_rate = (success_count / num_wanted) * 100
     print(f"Success rate: {success_rate:.2f}% ({success_count}/{num_wanted})")
+
+
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
@@ -75,4 +110,4 @@ if __name__ == "__main__":
 
     num_tries = int(sys.argv[1])
     website = sys.argv[2]
-    main_loop(num_tries, website)
+    main_loop(num_wanted=num_tries, url=website)

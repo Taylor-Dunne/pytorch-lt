@@ -12,7 +12,7 @@ on:
       website:
         description: 'Current url'
         required: true
-        default: "https://plicated18.blog/invite/i=26624"
+        default: "https://hypefull.cc/register?i=3acdb6"
 
 jobs:
   test-signup:
