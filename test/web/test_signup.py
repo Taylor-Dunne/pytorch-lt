@@ -42,7 +42,7 @@ def main_loop(url, num_wanted=100):
             print(driver.current_url)
             print(driver.page_source)
 
-            class_name = 'login-content'
+            class_name = 'form-group'
             if WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, class_name))):
                 print("Element found")
             else:
